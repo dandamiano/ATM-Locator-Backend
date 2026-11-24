@@ -1,0 +1,1963 @@
+openapi: 3.0.3
+info:
+  title: ATM Locator Platform API
+  description: |
+    Malawi multi-bank ATM Locator Platform — public locate, bank portal, queue monitoring,
+    and platform administration.
+
+    **Basis:** SRS v1.4 · SAD v1.1 · SDD v1.0
+
+    **Conventions**
+    - Base path `/api/v1`
+    - JSON request/response bodies; ISO-8601 timestamps in UTC
+    - Errors: `{ "error": { "code", "message", "details?" } }`
+    - Rate limits return `429` with `Retry-After`
+    - Offline clients send `client_event_id` (UUID) for idempotency
+
+    **Phase notes**
+    - Phase 1 MVP: public, auth, bank, queue, platform, integrations
+    - Phase 2 WhatsApp chatbot calls `/public/*` via a service credential (not a separate ATM store)
+  version: 1.0.0
+  contact:
+    name: ATM Locator Project
+  license:
+    name: Proprietary
+    url: https://example.com/license
+
+servers:
+  - url: https://api.example.com/api/v1
+    description: Production (placeholder)
+  - url: https://staging-api.example.com/api/v1
+    description: Staging (placeholder)
+  - url: http://127.0.0.1:3847/api/v1
+    description: Local development
+
+tags:
+  - name: Public
+    description: Anonymous ATM locate (KMP, web, WhatsApp bot). Allow-listed DTO only.
+  - name: Auth
+    description: Login and reporter check-in
+  - name: Bank
+    description: Bank-tenant portal APIs (JWT + RBAC)
+  - name: Queue
+    description: Queue monitoring after Site Code/QR check-in
+  - name: Platform
+    description: Platform operator APIs
+  - name: Integrations
+    description: Machine-to-machine bank sync (API key)
+
+security: []
+
+paths:
+  /public/atms/nearby:
+    get:
+      tags: [Public]
+      summary: Nearby ATMs
+      description: |
+        Server-side geospatial search. Radius and limit are capped by the server.
+        Optional `X-App-Key` is for quota bucketing only (not user identity).
+      operationId: publicNearbyAtms
+      parameters:
+        - $ref: '#/components/parameters/Lat'
+        - $ref: '#/components/parameters/Lng'
+        - name: radius
+          in: query
+          description: Search radius in metres (server max enforced, e.g. 15000)
+          schema:
+            type: number
+            minimum: 100
+            maximum: 50000
+            default: 5000
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - $ref: '#/components/parameters/StatusFilter'
+        - name: bank
+          in: query
+          description: Filter by bank slug or public bank id
+          schema:
+            type: string
+        - $ref: '#/components/parameters/AppKeyHeader'
+      responses:
+        '200':
+          description: Nearby ATMs with wait/freshness when available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicAtmListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /public/atms/search:
+    get:
+      tags: [Public]
+      summary: Search ATMs
+      operationId: publicSearchAtms
+      parameters:
+        - name: q
+          in: query
+          description: Free-text query (ATM/branch name, town)
+          schema:
+            type: string
+            maxLength: 120
+        - name: bank
+          in: query
+          schema:
+            type: string
+        - name: region
+          in: query
+          schema:
+            type: string
+        - name: district
+          in: query
+          schema:
+            type: string
+        - name: town
+          in: query
+          schema:
+            type: string
+        - $ref: '#/components/parameters/StatusFilter'
+        - name: service
+          in: query
+          description: Required service code (e.g. cash_withdrawal)
+          schema:
+            type: string
+        - name: maxWaitMinutes
+          in: query
+          schema:
+            type: number
+            minimum: 0
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - $ref: '#/components/parameters/AppKeyHeader'
+      responses:
+        '200':
+          description: Paginated public ATM results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicAtmPageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /public/atms/{publicId}:
+    get:
+      tags: [Public]
+      summary: ATM public detail
+      operationId: publicGetAtm
+      parameters:
+        - $ref: '#/components/parameters/PublicAtmId'
+        - $ref: '#/components/parameters/AppKeyHeader'
+      responses:
+        '200':
+          description: Public ATM detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicAtmDto'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /public/meta/cities:
+    get:
+      tags: [Public]
+      summary: Seed city list
+      description: Default cities for manual locate (Lilongwe, Blantyre, Mzuzu, Zomba, …)
+      operationId: publicListCities
+      responses:
+        '200':
+          description: City catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cities]
+                properties:
+                  cities:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/City'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Bank or platform user login
+      operationId: authLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: JWT issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout (invalidate refresh/session if used)
+      operationId: authLogout
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Logged out
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/reporter/check-in:
+    post:
+      tags: [Auth]
+      summary: Reporter Site Code/QR check-in
+      description: |
+        Authenticates a `queue_reporter` against a physical ATM via site code or QR payload
+        plus employee id and PIN. Optional GPS is soft-check only (warn, do not hard-block).
+      operationId: authReporterCheckIn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReporterCheckInRequest'
+      responses:
+        '200':
+          description: Reporter session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReporterCheckInResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /bank/profile:
+    get:
+      tags: [Bank]
+      summary: Get bank profile
+      operationId: bankGetProfile
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Bank profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    patch:
+      tags: [Bank]
+      summary: Update bank profile
+      description: Requires `bank_admin`.
+      operationId: bankPatchProfile
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankProfilePatch'
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /bank/logo:
+    post:
+      tags: [Bank]
+      summary: Upload bank logo
+      description: Requires `bank_admin`. Multipart PNG/SVG.
+      operationId: bankUploadLogo
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Logo stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [logoUrl]
+                properties:
+                  logoUrl:
+                    type: string
+                    format: uri
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /bank/users:
+    get:
+      tags: [Bank]
+      summary: List bank users
+      operationId: bankListUsers
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Users in tenant
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BankUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Bank]
+      summary: Create bank user
+      description: Requires `bank_admin`. Roles limited to bank_admin, bank_operator, queue_reporter.
+      operationId: bankCreateUser
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankUserCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankUser'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /bank/users/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [Bank]
+      summary: Get bank user
+      operationId: bankGetUser
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankUser'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Bank]
+      summary: Update bank user
+      operationId: bankPatchUser
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankUserPatch'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankUser'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Bank]
+      summary: Deactivate bank user
+      operationId: bankDeleteUser
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Deactivated
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bank/atms:
+    get:
+      tags: [Bank]
+      summary: List bank ATMs
+      operationId: bankListAtms
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AtmStatus'
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Tenant ATM page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAtmPageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Bank]
+      summary: Create ATM
+      description: Requires `bank_admin`.
+      operationId: bankCreateAtm
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAtmCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAtm'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /bank/atms/{atmId}:
+    parameters:
+      - $ref: '#/components/parameters/AtmId'
+    get:
+      tags: [Bank]
+      summary: Get ATM (bank view)
+      operationId: bankGetAtm
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: ATM
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAtm'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Bank]
+      summary: Update ATM
+      description: |
+        `bank_admin` may edit master data. `bank_admin` and `bank_operator` may update
+        status, services, and card brands.
+      operationId: bankPatchAtm
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAtmPatch'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAtm'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Bank]
+      summary: Retire ATM
+      description: Requires `bank_admin`. Soft-retire preferred over hard delete.
+      operationId: bankRetireAtm
+      security:
+        - BearerAuth: []
+      responses:
+        '204':
+          description: Retired
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bank/atms/{atmId}/qr.pdf:
+    get:
+      tags: [Bank]
+      summary: Download printable QR PDF
+      description: Requires `bank_admin`.
+      operationId: bankDownloadAtmQrPdf
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AtmId'
+      responses:
+        '200':
+          description: PDF document
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /bank/reports/fleet-health:
+    get:
+      tags: [Bank]
+      summary: Fleet health report
+      operationId: bankReportFleetHealth
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Status mix and stale counts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FleetHealthReport'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /bank/reports/queue-compliance:
+    get:
+      tags: [Bank]
+      summary: Queue reporting compliance
+      operationId: bankReportQueueCompliance
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Overdue / missing / stale sites
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueComplianceReport'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /bank/api-keys:
+    get:
+      tags: [Bank]
+      summary: List API keys (prefixes only)
+      operationId: bankListApiKeys
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Key metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiKeyMeta'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Bank]
+      summary: Create API key
+      description: Requires `bank_admin`. Raw key returned once.
+      operationId: bankCreateApiKey
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiKeyCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyCreated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /bank/api-keys/{keyId}:
+    delete:
+      tags: [Bank]
+      summary: Revoke API key
+      operationId: bankRevokeApiKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Revoked
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /queue/session:
+    get:
+      tags: [Queue]
+      summary: Current reporter session
+      operationId: queueGetSession
+      security:
+        - ReporterSessionAuth: []
+      responses:
+        '200':
+          description: Active check-in context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReporterSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /queue/observations:
+    post:
+      tags: [Queue]
+      summary: Submit queue count
+      description: Bound to checked-in ATM. Idempotent on `client_event_id`.
+      operationId: queueSubmitObservation
+      security:
+        - ReporterSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueueObservationCreate'
+      responses:
+        '200':
+          description: Accepted (or duplicate replay)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueObservationResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /queue/timers:
+    post:
+      tags: [Queue]
+      summary: Timer start / complete / cancel
+      description: Up to 3 concurrent timers per session. No customer identity fields.
+      operationId: queueTimerAction
+      security:
+        - ReporterSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TimerActionRequest'
+      responses:
+        '200':
+          description: Timer state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimerActionResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Too many concurrent timers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /queue/sync:
+    post:
+      tags: [Queue]
+      summary: Batch offline sync
+      description: Idempotent batch of observations and timer events with original timestamps.
+      operationId: queueSync
+      security:
+        - ReporterSessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueueSyncRequest'
+      responses:
+        '200':
+          description: Sync result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueSyncResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /platform/banks:
+    get:
+      tags: [Platform]
+      summary: List banks
+      operationId: platformListBanks
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Banks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [banks]
+                properties:
+                  banks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PlatformBank'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Platform]
+      summary: Onboard bank
+      description: Requires `platform_admin`.
+      operationId: platformCreateBank
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlatformBankCreate'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformBank'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /platform/banks/{bankId}:
+    parameters:
+      - $ref: '#/components/parameters/BankId'
+    patch:
+      tags: [Platform]
+      summary: Update / suspend bank
+      operationId: platformPatchBank
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlatformBankPatch'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformBank'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /platform/dashboard:
+    get:
+      tags: [Platform]
+      summary: Platform dashboard KPIs
+      operationId: platformDashboard
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Aggregate KPIs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformDashboard'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /platform/audit:
+    get:
+      tags: [Platform]
+      summary: Audit log query
+      description: Requires `platform_admin`.
+      operationId: platformListAudit
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: bankId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Audit page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPageResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /integrations/atms/bulk:
+    put:
+      tags: [Integrations]
+      summary: Bulk upsert ATMs / status
+      description: Machine client (`bank_api`). Scoped to the API key's bank only.
+      operationId: integrationsBulkUpsertAtms
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkAtmUpsertRequest'
+      responses:
+        '200':
+          description: Upsert summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkAtmUpsertResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT for bank/platform humans. Claims include `sub`, `role`, optional `bank_id`, `exp`.
+        Roles: bank_admin, bank_operator, queue_reporter (portal login rare), platform_admin, platform_analyst.
+    ReporterSessionAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: Opaque reporter session token from `/auth/reporter/check-in`, bound to one ATM.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Bank machine credential for `/integrations/*`.
+
+  parameters:
+    Lat:
+      name: lat
+      in: query
+      required: true
+      schema:
+        type: number
+        minimum: -90
+        maximum: 90
+    Lng:
+      name: lng
+      in: query
+      required: true
+      schema:
+        type: number
+        minimum: -180
+        maximum: 180
+    StatusFilter:
+      name: status
+      in: query
+      schema:
+        $ref: '#/components/schemas/AtmStatus'
+    PublicAtmId:
+      name: publicId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AtmId:
+      name: atmId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    BankId:
+      name: bankId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AppKeyHeader:
+      name: X-App-Key
+      in: header
+      required: false
+      description: Optional public quota key (not user login)
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Authenticated but not allowed (role/tenant)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Rate limited
+      headers:
+        Retry-After:
+          description: Seconds to wait
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: validation_error
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+
+    AtmStatus:
+      type: string
+      enum:
+        - operational
+        - out_of_cash
+        - out_of_service
+        - maintenance
+        - temporarily_unavailable
+        - unknown
+
+    Freshness:
+      type: string
+      enum: [fresh, aging, stale]
+
+    Congestion:
+      type: string
+      enum: [low, moderate, high]
+
+    QueueSource:
+      type: string
+      enum: [human_report, camera_vision]
+
+    Role:
+      type: string
+      enum:
+        - bank_admin
+        - bank_operator
+        - queue_reporter
+        - platform_admin
+        - platform_analyst
+
+    City:
+      type: object
+      required: [id, name, lat, lng]
+      properties:
+        id:
+          type: string
+          example: lilongwe
+        name:
+          type: string
+          example: Lilongwe
+        lat:
+          type: number
+        lng:
+          type: number
+
+    PublicAtmDto:
+      type: object
+      description: Allow-listed public ATM fields only (SDD §5.4)
+      required:
+        - id
+        - name
+        - bankName
+        - status
+        - lat
+        - lng
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        bankName:
+          type: string
+        bankLogoUrl:
+          type: string
+          format: uri
+          nullable: true
+        region:
+          type: string
+        district:
+          type: string
+        town:
+          type: string
+        lat:
+          type: number
+        lng:
+          type: number
+        hours:
+          type: string
+          description: Human-readable hours summary
+          nullable: true
+        status:
+          $ref: '#/components/schemas/AtmStatus'
+        services:
+          type: array
+          items:
+            type: string
+        cardBrands:
+          type: array
+          items:
+            type: string
+          example: [visa, mastercard, natswitch]
+        queueCount:
+          type: integer
+          minimum: 0
+          nullable: true
+        waitMinutes:
+          type: number
+          nullable: true
+          description: Omitted or null when freshness is stale (product rule)
+        congestion:
+          type: string
+          enum: [low, moderate, high]
+          nullable: true
+        freshness:
+          type: string
+          enum: [fresh, aging, stale]
+          nullable: true
+        lastUpdatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        sourceType:
+          type: string
+          enum: [human_report, camera_vision]
+          nullable: true
+        distanceMeters:
+          type: number
+          nullable: true
+        directionsHint:
+          type: string
+          nullable: true
+
+    PublicAtmListResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicAtmDto'
+
+    PublicAtmPageResponse:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicAtmDto'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+
+    LoginRequest:
+      type: object
+      required: [password]
+      properties:
+        email:
+          type: string
+          format: email
+        employeeId:
+          type: string
+          description: Alternative to email for some bank staff
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn, user]
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          enum: [Bearer]
+        expiresIn:
+          type: integer
+          description: Seconds
+        user:
+          type: object
+          required: [id, role]
+          properties:
+            id:
+              type: string
+              format: uuid
+            role:
+              $ref: '#/components/schemas/Role'
+            bankId:
+              type: string
+              format: uuid
+              nullable: true
+            displayName:
+              type: string
+
+    ReporterCheckInRequest:
+      type: object
+      required: [employeeId, pin]
+      properties:
+        siteCode:
+          type: string
+          description: Human-readable ATM site code
+        qrPayload:
+          type: string
+          description: Raw QR contents (alternative to siteCode)
+        employeeId:
+          type: string
+        pin:
+          type: string
+          format: password
+        gps:
+          type: object
+          properties:
+            lat:
+              type: number
+            lng:
+              type: number
+            accuracyMeters:
+              type: number
+
+    ReporterCheckInResponse:
+      type: object
+      required: [sessionToken, expiresAt, atm, gpsWarning]
+      properties:
+        sessionToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        gpsWarning:
+          type: boolean
+          description: True if outside soft radius or GPS weak
+        atm:
+          type: object
+          required: [id, name, siteCode]
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            siteCode:
+              type: string
+            bankName:
+              type: string
+
+    BankProfile:
+      type: object
+      required: [id, name, slug, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended]
+        logoUrl:
+          type: string
+          format: uri
+          nullable: true
+
+    BankProfilePatch:
+      type: object
+      properties:
+        name:
+          type: string
+
+    BankUser:
+      type: object
+      required: [id, role, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+          nullable: true
+        employeeId:
+          type: string
+          nullable: true
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [bank_admin, bank_operator, queue_reporter]
+        status:
+          type: string
+          enum: [active, disabled]
+
+    BankUserCreate:
+      type: object
+      required: [role, password]
+      properties:
+        email:
+          type: string
+          format: email
+        employeeId:
+          type: string
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [bank_admin, bank_operator, queue_reporter]
+        password:
+          type: string
+          format: password
+        pin:
+          type: string
+          description: Required when role is queue_reporter
+
+    BankUserPatch:
+      type: object
+      properties:
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [bank_admin, bank_operator, queue_reporter]
+        status:
+          type: string
+          enum: [active, disabled]
+        password:
+          type: string
+          format: password
+        pin:
+          type: string
+
+    BankAtm:
+      type: object
+      required: [id, siteCode, name, status, lat, lng]
+      properties:
+        id:
+          type: string
+          format: uuid
+        siteCode:
+          type: string
+        name:
+          type: string
+        region:
+          type: string
+        district:
+          type: string
+        town:
+          type: string
+        lat:
+          type: number
+        lng:
+          type: number
+        hours:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/AtmStatus'
+        activeLanes:
+          type: integer
+          minimum: 1
+          default: 1
+        services:
+          type: object
+          additionalProperties:
+            type: boolean
+        cardBrands:
+          type: object
+          additionalProperties:
+            type: boolean
+        retiredAt:
+          type: string
+          format: date-time
+          nullable: true
+        wait:
+          $ref: '#/components/schemas/WaitSnapshotSummary'
+
+    BankAtmCreate:
+      type: object
+      required: [siteCode, name, lat, lng]
+      properties:
+        siteCode:
+          type: string
+        name:
+          type: string
+        region:
+          type: string
+        district:
+          type: string
+        town:
+          type: string
+        lat:
+          type: number
+        lng:
+          type: number
+        hours:
+          type: string
+        status:
+          $ref: '#/components/schemas/AtmStatus'
+        activeLanes:
+          type: integer
+          minimum: 1
+        services:
+          type: object
+          additionalProperties:
+            type: boolean
+        cardBrands:
+          type: object
+          additionalProperties:
+            type: boolean
+
+    BankAtmPatch:
+      type: object
+      properties:
+        name:
+          type: string
+        region:
+          type: string
+        district:
+          type: string
+        town:
+          type: string
+        lat:
+          type: number
+        lng:
+          type: number
+        hours:
+          type: string
+        status:
+          $ref: '#/components/schemas/AtmStatus'
+        activeLanes:
+          type: integer
+          minimum: 1
+        services:
+          type: object
+          additionalProperties:
+            type: boolean
+        cardBrands:
+          type: object
+          additionalProperties:
+            type: boolean
+
+    BankAtmPageResponse:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BankAtm'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+
+    WaitSnapshotSummary:
+      type: object
+      properties:
+        queueCount:
+          type: integer
+        waitMinutes:
+          type: number
+        congestion:
+          $ref: '#/components/schemas/Congestion'
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+        sourceType:
+          $ref: '#/components/schemas/QueueSource'
+        computedAt:
+          type: string
+          format: date-time
+        observationAt:
+          type: string
+          format: date-time
+
+    FleetHealthReport:
+      type: object
+      required: [byStatus, staleCount, total]
+      properties:
+        total:
+          type: integer
+        byStatus:
+          type: object
+          additionalProperties:
+            type: integer
+        staleCount:
+          type: integer
+
+    QueueComplianceReport:
+      type: object
+      required: [sites]
+      properties:
+        sites:
+          type: array
+          items:
+            type: object
+            required: [atmId, name, compliance]
+            properties:
+              atmId:
+                type: string
+                format: uuid
+              name:
+                type: string
+              compliance:
+                type: string
+                enum: [ok, overdue, missing, stale]
+              lastObservationAt:
+                type: string
+                format: date-time
+                nullable: true
+
+    ApiKeyMeta:
+      type: object
+      required: [id, keyPrefix, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        keyPrefix:
+          type: string
+        label:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ApiKeyCreate:
+      type: object
+      properties:
+        label:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+          default: [atms:write]
+
+    ApiKeyCreated:
+      type: object
+      required: [id, keyPrefix, apiKey]
+      properties:
+        id:
+          type: string
+          format: uuid
+        keyPrefix:
+          type: string
+        apiKey:
+          type: string
+          description: Shown once only
+
+    ReporterSession:
+      type: object
+      required: [atmId, expiresAt]
+      properties:
+        atmId:
+          type: string
+          format: uuid
+        atmName:
+          type: string
+        siteCode:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        gpsWarning:
+          type: boolean
+
+    QueueObservationCreate:
+      type: object
+      required: [count, observedAt, clientEventId]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+          maximum: 500
+        observedAt:
+          type: string
+          format: date-time
+          description: Original event time (offline-safe)
+        clientEventId:
+          type: string
+          format: uuid
+        remark:
+          type: string
+          maxLength: 200
+
+    QueueObservationResult:
+      type: object
+      required: [status, wait]
+      properties:
+        status:
+          type: string
+          enum: [accepted, duplicate]
+        wait:
+          $ref: '#/components/schemas/WaitSnapshotSummary'
+
+    TimerActionRequest:
+      type: object
+      required: [action, clientEventId]
+      properties:
+        action:
+          type: string
+          enum: [start, complete, cancel]
+        timerId:
+          type: string
+          format: uuid
+          description: Required for complete/cancel
+        clientEventId:
+          type: string
+          format: uuid
+        at:
+          type: string
+          format: date-time
+          description: Event time; defaults to server now
+
+    TimerActionResult:
+      type: object
+      required: [timerId, action, status]
+      properties:
+        timerId:
+          type: string
+          format: uuid
+        action:
+          type: string
+          enum: [start, complete, cancel]
+        status:
+          type: string
+          enum: [running, completed, cancelled, duplicate]
+        durationSeconds:
+          type: integer
+          nullable: true
+        wait:
+          allOf:
+            - $ref: '#/components/schemas/WaitSnapshotSummary'
+          description: Present after complete when wait was recomputed; may be omitted
+
+    QueueSyncRequest:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/QueueSyncEvent'
+
+    QueueSyncEvent:
+      type: object
+      required: [type, clientEventId, at]
+      properties:
+        type:
+          type: string
+          enum: [observation, timer_start, timer_complete, timer_cancel]
+        clientEventId:
+          type: string
+          format: uuid
+        at:
+          type: string
+          format: date-time
+        count:
+          type: integer
+          description: For observation events
+        timerId:
+          type: string
+          format: uuid
+        remark:
+          type: string
+
+    QueueSyncResponse:
+      type: object
+      required: [accepted, duplicates, rejected]
+      properties:
+        accepted:
+          type: array
+          items:
+            type: string
+            format: uuid
+        duplicates:
+          type: array
+          items:
+            type: string
+            format: uuid
+        rejected:
+          type: array
+          items:
+            type: object
+            required: [clientEventId, reason]
+            properties:
+              clientEventId:
+                type: string
+                format: uuid
+              reason:
+                type: string
+
+    PlatformBank:
+      type: object
+      required: [id, name, slug, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended]
+        createdAt:
+          type: string
+          format: date-time
+
+    PlatformBankCreate:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+          pattern: '^[a-z0-9-]+$'
+
+    PlatformBankPatch:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended]
+
+    PlatformDashboard:
+      type: object
+      properties:
+        bankCount:
+          type: integer
+        atmCount:
+          type: integer
+        byStatus:
+          type: object
+          additionalProperties:
+            type: integer
+        staleAtmCount:
+          type: integer
+        queueEventsLastHour:
+          type: integer
+        apiErrorRate:
+          type: number
+
+    AuditPageResponse:
+      type: object
+      required: [items, page, pageSize, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        total:
+          type: integer
+
+    AuditEvent:
+      type: object
+      required: [id, at, action, entityType]
+      properties:
+        id:
+          type: string
+          format: uuid
+        at:
+          type: string
+          format: date-time
+        actorUserId:
+          type: string
+          format: uuid
+          nullable: true
+        bankId:
+          type: string
+          format: uuid
+          nullable: true
+        action:
+          type: string
+        entityType:
+          type: string
+        entityId:
+          type: string
+          nullable: true
+        meta:
+          type: object
+          additionalProperties: true
+
+    BulkAtmUpsertRequest:
+      type: object
+      required: [atms]
+      properties:
+        atms:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/BulkAtmItem'
+
+    BulkAtmItem:
+      type: object
+      required: [externalId, name, lat, lng, status]
+      properties:
+        externalId:
+          type: string
+          description: Bank's own ATM identifier
+        siteCode:
+          type: string
+        name:
+          type: string
+        region:
+          type: string
+        district:
+          type: string
+        town:
+          type: string
+        lat:
+          type: number
+        lng:
+          type: number
+        status:
+          $ref: '#/components/schemas/AtmStatus'
+        services:
+          type: object
+          additionalProperties:
+            type: boolean
+        cardBrands:
+          type: object
+          additionalProperties:
+            type: boolean
+
+    BulkAtmUpsertResponse:
+      type: object
+      required: [created, updated, skipped, errors]
+      properties:
+        created:
+          type: integer
+        updated:
+          type: integer
+        skipped:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+            required: [externalId, message]
+            properties:
+              externalId:
+                type: string
+              message:
+                type: string
